@@ -12,7 +12,6 @@ maintainer:         auke@tulcod.com
 -- copyright:
 category:           Graphics
 build-type:         Simple
-extra-doc-files:    CHANGELOG.md
 -- extra-source-files:
 
 common warnings
