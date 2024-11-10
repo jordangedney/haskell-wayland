@@ -80,10 +80,9 @@ readProtocol = do
   datadir <- figureOutWaylandDataDir
   parseFile (datadir ++ "/" ++ protocolFile)
 
-
 -- TODO move this into some pretty Setup.hs thing as soon as someone complains about portability
 figureOutWaylandDataDir :: IO String
-figureOutWaylandDataDir =
-  head <$> lines <$> readProcess "pkg-config" ["wayland-server", "--variable=pkgdatadir"] []
+figureOutWaylandDataDir = return "//usr/share/wayland"
+  -- head <$> lines <$> readProcess "pkg-config" ["wayland-server", "--variable=pkgdatadir"] []
 
 protocolFile = "wayland.xml"

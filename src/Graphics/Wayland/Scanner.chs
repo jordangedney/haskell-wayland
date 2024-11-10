@@ -41,7 +41,6 @@ import qualified Graphics.Wayland.Internal.Util as Util (Client)
 -- Dear future maintainer,
 -- I'm sorry.
 
-
 #include <wayland-server.h>
 
 
@@ -53,6 +52,7 @@ type ProcessWithExports a = WriterT [String] Q a
 export :: String -> ProcessWithExports ()
 export name = tell [name]
 
+
 -- | Wayland data types - exported in the Internal.{Client,Server}Types modules
 generateDataTypes :: ProtocolSpec -> Q [Dec]
 generateDataTypes ps = liftM concat $ sequence $ map generateInterface (protocolInterfaces ps) where
@@ -62,7 +62,18 @@ generateDataTypes ps = liftM concat $ sequence $ map generateInterface (protocol
         pname = protocolName ps
         qname = interfaceTypeName pname iname
     constructorType <- [t|$(conT ''Ptr) $(conT $ mkName qname)|]
-    typeDec <- newtypeD (return []) (mkName qname) [] (normalC (mkName qname) [return (NotStrict, constructorType)]) [mkName "Show", mkName "Eq"]
+    typeDec <- newtypeD
+                 (return [])                   -- Context
+                 (mkName qname)                -- Newtype name
+                 []                            -- Type variables
+                 Nothing                       -- Kind (use Nothing if no specific kind)
+                 (normalC
+                    (mkName qname)
+
+                    [return (Bang NoSourceUnpackedness NoSourceStrictness,
+                             constructorType)]) -- Constructor
+                 -- Derivations
+                 [return (DerivClause Nothing [ConT ''Show, ConT ''Eq])]
 
     versionInstance <- [d|
       instance ProtocolVersion $(conT $ mkName qname) where
@@ -132,7 +143,15 @@ generateEnums ps = return $ concat $ map eachGenerateEnums (protocolInterfaces p
     generateEnum wlenum =
       let qname = enumTypeName (protocolName ps) (interfaceName iface) (enumName wlenum)
       in
-        NewtypeD [] qname [] (NormalC qname [(NotStrict, (ConT ''Int))]) [mkName "Show", mkName "Eq"]
+
+        NewtypeD 
+          [] qname [] Nothing 
+          (NormalC qname
+           [(Bang NoSourceUnpackedness NoSourceStrictness, ConT ''Int)]) 
+          [DerivClause Nothing [ConT ''Show, ConT ''Eq]]
+
+        -- NewtypeD [] qname [] Nothing (NormalC qname [(Bang NoSourceUnpackedness NoSourceStrictness, (ConT ''Int))]) [mkName "Show", mkName "Eq"]
+        -- NewtypeD [] qname [] Nothing (NormalC qname [(Bang NoSourceUnpackedness NoSourceStrictness, (ConT ''Int))]) [mkName "Show", mkName "Eq"]
         :
         map (\(entry, val) -> (ValD (VarP $ enumEntryHaskName (protocolName ps) (interfaceName iface) (enumName wlenum) entry) (NormalB $ (ConE qname) `AppE` (LitE $ IntegerL $ toInteger val)) [])) (enumEntries wlenum)
 
@@ -321,9 +340,9 @@ generateListenerTypes sp sc = sequence $ map generateListenerType $
         mkListenerConstr msg = do
           let name = mkName $ mkMessageName msg
           ltype <- mkListenerType msg
-          return (name, NotStrict, ltype)
+          return (name, Bang NoSourceUnpackedness NoSourceStrictness, ltype)
       recArgs <- sequence $ map mkListenerConstr messages
-      return $ DataD [] typeName [] [RecC typeName recArgs] []
+      return $ DataD [] typeName [] Nothing [RecC typeName recArgs] []
 
 -- | For each interface, generate the callback API.
 generateListenerMethods :: ProtocolSpec -> ServerClient -> ProcessWithExports [Dec]
