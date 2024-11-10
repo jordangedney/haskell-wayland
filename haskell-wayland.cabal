@@ -1,0 +1,113 @@
+cabal-version:      3.4
+name:               haskell-wayland
+version:            0.1.0.0
+synopsis:           Haskell bindings for the C Wayland Library.
+-- description:
+homepage:           https://github.com/jordangedney/haskell-wayland.git
+license:            MIT
+license-file:       LICENSE
+author:             Auke Booij
+maintainer:         auke@tulcod.com
+
+-- copyright:
+category:           Graphics
+build-type:         Simple
+extra-doc-files:    CHANGELOG.md
+-- extra-source-files:
+
+common warnings
+    ghc-options: -Wall
+
+library
+    import:           warnings
+
+    exposed-modules:
+        Graphics.Wayland
+      , Graphics.Wayland.Client
+      , Graphics.Wayland.Server
+      , Graphics.Wayland.Scanner
+
+    other-modules:
+        Graphics.Wayland.Internal
+      , Graphics.Wayland.Internal.Client
+      , Graphics.Wayland.Internal.Cursor
+      , Graphics.Wayland.Internal.EGL
+      , Graphics.Wayland.Internal.ServerClientState
+      , Graphics.Wayland.Internal.Server
+      , Graphics.Wayland.Internal.Util
+      , Graphics.Wayland.Internal.Version
+      , Graphics.Wayland.Internal.SpliceClient
+      , Graphics.Wayland.Internal.SpliceServer
+      , Graphics.Wayland.Internal.SpliceClientTypes
+      , Graphics.Wayland.Internal.SpliceServerTypes
+      , Graphics.Wayland.Internal.SpliceClientInternal
+      , Graphics.Wayland.Internal.SpliceServerInternal
+      , Graphics.Wayland.Scanner.Marshaller
+      , Graphics.Wayland.Scanner.Names
+      , Graphics.Wayland.Scanner.Protocol
+      , Graphics.Wayland.Scanner.Types
+
+    build-depends:
+        base ^>=4.20.0.0
+      , time ^>= 1.12
+      , template-haskell ^>= 2.22
+      , xml ^>= 1.3
+      , process ^>= 1.6.19
+      , transformers ^>= 0.6.1
+      , data-flags ^>= 0.0.3
+
+    build-tool-depends: c2hs:c2hs
+
+    hs-source-dirs:   src
+    default-language: GHC2024
+
+    extra-libraries:
+        wayland-client
+      , wayland-cursor
+      , wayland-egl
+      , wayland-server
+
+    includes:
+        wayland-client.h
+      , wayland-server.h
+      , wayland-client-protocol.h
+      , wayland-server-protocol.h
+      , wayland-util.h
+      , wayland-version.h
+      , wayland-egl.h
+
+test-suite firsttest
+    import:           warnings
+    default-language: GHC2024
+    -- other-modules:
+    -- other-extensions:
+    type:             exitcode-stdio-1.0
+    hs-source-dirs:   test
+    main-is:          test.hs
+    build-depends:
+        base ^>=4.20.0.0
+      , haskell-wayland
+
+test-suite enumtest
+    import:           warnings
+    default-language: GHC2024
+    -- other-modules:
+    -- other-extensions:
+    type:             exitcode-stdio-1.0
+    hs-source-dirs:   test
+    main-is:          enums.hs
+    build-depends:
+        base ^>=4.20.0.0
+      , haskell-wayland
+
+test-suite wayland-list-globals
+    import:           warnings
+    default-language: GHC2024
+    -- other-modules:
+    -- other-extensions:
+    type:             exitcode-stdio-1.0
+    hs-source-dirs:   test
+    main-is:          listglobals.hs
+    build-depends:
+        base ^>=4.20.0.0
+      , haskell-wayland
