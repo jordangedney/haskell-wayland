@@ -136,29 +136,45 @@ generateRegistryBind ps = do
         return $ fore : exposureDec
 
 
--- | Wayland has an "enum" type argument for messages. Here, we generate the corresponding Haskell types.
---
---   Note that wayland-style enums might not actually be enums, in the sense that they are sometimes
---   actually bit fields.
+-- | Wayland has an "enum" type argument for messages. Here, we generate the
+--   corresponding Haskell types. Note that wayland-style enums might not
+--   actually be enums, in the sense that they are sometimes actually bit fields.
 generateEnums :: ProtocolSpec -> Q [Dec]
-generateEnums ps = return $ concat $ map eachGenerateEnums (protocolInterfaces ps) where
+generateEnums ps = pure $ concat $ map eachGenerateEnums (protocolInterfaces ps) where
   eachGenerateEnums :: Interface -> [Dec]
   eachGenerateEnums iface = concat $ map generateEnum $ interfaceEnums iface where
     generateEnum :: WLEnum -> [Dec]
     generateEnum wlenum =
-      let qname = enumTypeName (protocolName ps) (interfaceName iface) (enumName wlenum)
-      in
+      let qname =
+            enumTypeName (protocolName ps) (interfaceName iface) (enumName wlenum)
 
-        NewtypeD 
-          [] qname [] Nothing 
-          (NormalC qname
-           [(Bang NoSourceUnpackedness NoSourceStrictness, ConT ''Int)]) 
-          [DerivClause Nothing [ConT ''Show, ConT ''Eq]]
+          -- define a newtype for the wayland enum
+          enumNewtype = 
+            NewtypeD 
+              [] qname [] Nothing 
+              (NormalC qname
+              [(Bang NoSourceUnpackedness NoSourceStrictness, ConT ''Int)]) 
+              [DerivClause Nothing [ConT ''Show, ConT ''Eq]]
 
-        -- NewtypeD [] qname [] Nothing (NormalC qname [(Bang NoSourceUnpackedness NoSourceStrictness, (ConT ''Int))]) [mkName "Show", mkName "Eq"]
-        -- NewtypeD [] qname [] Nothing (NormalC qname [(Bang NoSourceUnpackedness NoSourceStrictness, (ConT ''Int))]) [mkName "Show", mkName "Eq"]
-        :
-        map (\(entry, val) -> (ValD (VarP $ enumEntryHaskName (protocolName ps) (interfaceName iface) (enumName wlenum) entry) (NormalB $ (ConE qname) `AppE` (LitE $ IntegerL $ toInteger val)) [])) (enumEntries wlenum)
+          -- create a unique name for each enum entry
+          mkEnumName :: String -> Name
+          mkEnumName = enumEntryHaskName (protocolName ps)
+                                         (interfaceName iface)
+                                         (enumName wlenum)
+
+          -- map each entry inside the enum to its name and integer val
+          enumNamesAndVals :: [(Name, Integer)]
+          enumNamesAndVals =
+            [ (mkEnumName e, toInteger v) | (e, v) <- enumEntries wlenum ]
+
+          -- define a haskell value for each enum entry
+          mkHaskellDec :: (Name, Integer) -> Dec
+          mkHaskellDec (name, val) =
+            let definitionName = VarP name
+                definitionBody = (ConE qname) `AppE` (LitE (IntegerL val))
+            in ValD definitionName (NormalB definitionBody) []
+
+      in enumNewtype : (map mkHaskellDec enumNamesAndVals)
 
 -- | We will need a pointer to the wl_interface structs, for passing to wl_proxy_marshal_constructor and wl_resource_create.
 --   Now, a pretty solution would construct its own wl_interface struct here.
