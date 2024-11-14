@@ -68,10 +68,10 @@ generateDataTypes ps =
           pname = protocolName ps
           qname = mkName (interfaceTypeName pname iname)
 
-      constructorType <- [t|$(conT ''Ptr) $(conT qname)|]
+      constructorType <- [t| Ptr $(conT qname)|]
 
       typeDec <- newtypeD
-                   (return [])  -- Context; The type constraints for the newtype
+                   (return [])  -- Context; no type constraints
                    qname        -- Newtype name
                    []           -- Type variables; it's not polymorphic
                    Nothing      -- Kind (use Nothing if no specific kind)
