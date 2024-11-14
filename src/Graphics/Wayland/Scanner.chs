@@ -55,32 +55,35 @@ export name = tell [name]
 
 -- | Wayland data types - exported in the Internal.{Client,Server}Types modules
 generateDataTypes :: ProtocolSpec -> Q [Dec]
-generateDataTypes ps = liftM concat $ sequence $ map generateInterface (protocolInterfaces ps) where
-  generateInterface :: Interface -> Q [Dec]
-  generateInterface iface = do
-    let iname = interfaceName iface
-        pname = protocolName ps
-        qname = interfaceTypeName pname iname
-    constructorType <- [t|$(conT ''Ptr) $(conT $ mkName qname)|]
-    typeDec <- newtypeD
-                 (return [])                   -- Context
-                 (mkName qname)                -- Newtype name
-                 []                            -- Type variables
-                 Nothing                       -- Kind (use Nothing if no specific kind)
-                 (normalC
-                    (mkName qname)
+generateDataTypes ps =
+  liftM concat $ sequence $ map generateInterface (protocolInterfaces ps)
+  where
+    generateInterface :: Interface -> Q [Dec]
+    generateInterface iface = do
+      let iname = interfaceName iface
+          pname = protocolName ps
+          qname = mkName (interfaceTypeName pname iname)
 
-                    [return (Bang NoSourceUnpackedness NoSourceStrictness,
-                             constructorType)]) -- Constructor
-                 -- Derivations
-                 [return (DerivClause Nothing [ConT ''Show, ConT ''Eq])]
+      constructorType <- [t|$(conT ''Ptr) $(conT qname)|]
 
-    versionInstance <- [d|
-      instance ProtocolVersion $(conT $ mkName qname) where
-        protocolVersion _ = $(litE $ IntegerL $ fromIntegral $ interfaceVersion iface)
-      |]
+      typeDec <- newtypeD
+                   (return [])  -- Context; The type constraints for the newtype
+                   qname        -- Newtype name
+                   []           -- Type variables; it's not polymorphic
+                   Nothing      -- Kind (use Nothing if no specific kind)
+                   -- Constructor
+                   (normalC qname
+                            [return (Bang NoSourceUnpackedness NoSourceStrictness,
+                                     constructorType)])
+                   -- Derivations
+                   [return (DerivClause Nothing [ConT ''Show, ConT ''Eq])]
 
-    return $ typeDec : versionInstance
+      versionInstance <- [d|
+        instance ProtocolVersion $(conT qname) where
+          protocolVersion _ =
+            $(litE $ IntegerL $ fromIntegral $ interfaceVersion iface) |]
+
+      return $ typeDec : versionInstance
 
 -- | The wayland registry allows one to construct global objects.
 --   Its API is in wayland.xml, but that API is type-unsafe, so we construct the
