@@ -57,19 +57,20 @@ export name = tell [name]
 lazyWithoutPacking :: Q Type -> Q BangType
 lazyWithoutPacking = bangType (bang noSourceUnpackedness noSourceStrictness)
 
---       typeDec' <- newtypeD
---                    (return [])  -- Context; no type constraints
---                    qname        -- Newtype name
---                    []           -- Type variables; it's not polymorphic
---                    Nothing      -- Kind (use Nothing if no specific kind)
---                    -- Constructor
---                    (normalC qname [lazyWithoutPacking (pure constructorType)])
---                    -- Derivations
---                    [derivClause Nothing [conT ''Show, conT ''Eq]]
+-- | Generates a Haskell `newtype` declaration with a single constructor.
+--   This newtype has no additional constraints, is non-polymorphic, and derives
+--   `Show` and `Eq`.
+--
+--   For example, calling `newtypeGenerator ''MyType (conT ''Int)` would yield:
+--       newtype MyType = MyType Int deriving (Show, Eq)
+newtypeGenerator :: Name -> Q Type -> Q Dec
 newtypeGenerator qname resultingType = 
-  newtypeD (return []) qname [] Nothing
-    (normalC qname [lazyWithoutPacking resultingType])
-    [derivClause Nothing [conT ''Show, conT ''Eq]]
+  newtypeD (pure [])       -- No type constraints
+            qname          -- Newtype name
+            []             -- No type variables; non-polymorphic
+            Nothing        -- No specific kind
+            (normalC qname [lazyWithoutPacking resultingType])  -- Single lazy constructor
+            [derivClause Nothing [conT ''Show, conT ''Eq]]      -- Derives Show and Eq
 
 -- | Wayland data types - exported in the Internal.{Client,Server}Types modules
 generateDataTypes :: ProtocolSpec -> Q [Dec]
