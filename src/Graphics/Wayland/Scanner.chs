@@ -78,7 +78,7 @@ generateDataTypes ps =
                    -- Constructor
                    (normalC qname [lazyWithoutPacking constructorType])
                    -- Derivations
-                   [return (DerivClause Nothing [ConT ''Show, ConT ''Eq])]
+                   [derivClause Nothing [conT ''Show, conT ''Eq]]
 
       versionInstance <- [d|
         instance ProtocolVersion $(conT qname) where
