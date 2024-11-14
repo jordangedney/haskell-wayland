@@ -54,8 +54,22 @@ export name = tell [name]
 
 -- | Create a `BangType` with lazy evaluation and no unpacking (the default
 --   behavior for data fields).
-lazyWithoutPacking :: Type -> Q BangType
-lazyWithoutPacking = bangType (bang noSourceUnpackedness noSourceStrictness) . pure
+lazyWithoutPacking :: Q Type -> Q BangType
+lazyWithoutPacking = bangType (bang noSourceUnpackedness noSourceStrictness)
+
+--       typeDec' <- newtypeD
+--                    (return [])  -- Context; no type constraints
+--                    qname        -- Newtype name
+--                    []           -- Type variables; it's not polymorphic
+--                    Nothing      -- Kind (use Nothing if no specific kind)
+--                    -- Constructor
+--                    (normalC qname [lazyWithoutPacking (pure constructorType)])
+--                    -- Derivations
+--                    [derivClause Nothing [conT ''Show, conT ''Eq]]
+newtypeGenerator qname resultingType = 
+  newtypeD (return []) qname [] Nothing
+    (normalC qname [lazyWithoutPacking resultingType])
+    [derivClause Nothing [conT ''Show, conT ''Eq]]
 
 -- | Wayland data types - exported in the Internal.{Client,Server}Types modules
 generateDataTypes :: ProtocolSpec -> Q [Dec]
@@ -70,15 +84,8 @@ generateDataTypes ps =
 
       constructorType <- [t| Ptr $(conT qname)|]
 
-      typeDec <- newtypeD
-                   (return [])  -- Context; no type constraints
-                   qname        -- Newtype name
-                   []           -- Type variables; it's not polymorphic
-                   Nothing      -- Kind (use Nothing if no specific kind)
-                   -- Constructor
-                   (normalC qname [lazyWithoutPacking constructorType])
-                   -- Derivations
-                   [derivClause Nothing [conT ''Show, conT ''Eq]]
+      typeDec <- newtypeGenerator qname (pure constructorType)
+
 
       versionInstance <- [d|
         instance ProtocolVersion $(conT qname) where
@@ -140,41 +147,44 @@ generateRegistryBind ps = do
 --   corresponding Haskell types. Note that wayland-style enums might not
 --   actually be enums, in the sense that they are sometimes actually bit fields.
 generateEnums :: ProtocolSpec -> Q [Dec]
-generateEnums ps = pure $ concat $ map eachGenerateEnums (protocolInterfaces ps) where
-  eachGenerateEnums :: Interface -> [Dec]
-  eachGenerateEnums iface = concat $ map generateEnum $ interfaceEnums iface where
-    generateEnum :: WLEnum -> [Dec]
-    generateEnum wlenum =
-      let qname =
-            enumTypeName (protocolName ps) (interfaceName iface) (enumName wlenum)
+generateEnums ps =
+  fmap concat $ mapM eachGenerateEnums (protocolInterfaces ps) where
 
-          -- define a newtype for the wayland enum
-          enumNewtype = 
-            NewtypeD 
-              [] qname [] Nothing 
-              (NormalC qname
-              [(Bang NoSourceUnpackedness NoSourceStrictness, ConT ''Int)]) 
-              [DerivClause Nothing [ConT ''Show, ConT ''Eq]]
+    eachGenerateEnums :: Interface -> Q [Dec]
+    eachGenerateEnums iface =
 
-          -- create a unique name for each enum entry
-          mkEnumName :: String -> Name
-          mkEnumName = enumEntryHaskName (protocolName ps)
-                                         (interfaceName iface)
-                                         (enumName wlenum)
+      fmap concat $ mapM generateEnum (interfaceEnums iface) where
 
-          -- map each entry inside the enum to its name and integer val
-          enumNamesAndVals :: [(Name, Integer)]
-          enumNamesAndVals =
-            [ (mkEnumName e, toInteger v) | (e, v) <- enumEntries wlenum ]
+        generateEnum :: WLEnum -> Q [Dec]
+        generateEnum wlenum = do
+          let qname =
+                enumTypeName (protocolName ps) (interfaceName iface) (enumName wlenum)
 
-          -- define a haskell value for each enum entry
-          mkHaskellDec :: (Name, Integer) -> Dec
-          mkHaskellDec (name, val) =
-            let definitionName = VarP name
-                definitionBody = (ConE qname) `AppE` (LitE (IntegerL val))
-            in ValD definitionName (NormalB definitionBody) []
+              -- Define a newtype for the Wayland enum
+              enumNewtype :: Q Dec
+              enumNewtype = newtypeGenerator qname (conT ''Int)
 
-      in enumNewtype : (map mkHaskellDec enumNamesAndVals)
+              -- Create a unique name for each enum entry
+              mkEnumName :: String -> Name
+              mkEnumName = enumEntryHaskName (protocolName ps)
+                                             (interfaceName iface)
+                                             (enumName wlenum)
+
+              -- Map each entry inside the enum to its name and integer value
+              enumNamesAndVals :: [(Name, Integer)]
+              enumNamesAndVals =
+                [ (mkEnumName e, toInteger v) | (e, v) <- enumEntries wlenum ]
+
+              -- Define a Haskell value for each enum entry
+              mkHaskellDec :: (Name, Integer) -> Q Dec
+              mkHaskellDec (name, val) = 
+                valD (varP name) (normalB (conE qname `appE` litE (integerL val))) []
+
+          -- Generate the enum newtype declaration and the value declarations
+          -- for each entry
+          entries <- mapM mkHaskellDec enumNamesAndVals
+          newtypeDec <- enumNewtype
+          pure (newtypeDec : entries)
 
 -- | We will need a pointer to the wl_interface structs, for passing to wl_proxy_marshal_constructor and wl_resource_create.
 --   Now, a pretty solution would construct its own wl_interface struct here.
