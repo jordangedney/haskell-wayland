@@ -52,6 +52,10 @@ type ProcessWithExports a = WriterT [String] Q a
 export :: String -> ProcessWithExports ()
 export name = tell [name]
 
+-- | Create a `BangType` with lazy evaluation and no unpacking (the default
+--   behavior for data fields).
+lazyWithoutPacking :: Type -> Q BangType
+lazyWithoutPacking = bangType (bang noSourceUnpackedness noSourceStrictness) . pure
 
 -- | Wayland data types - exported in the Internal.{Client,Server}Types modules
 generateDataTypes :: ProtocolSpec -> Q [Dec]
@@ -72,9 +76,7 @@ generateDataTypes ps =
                    []           -- Type variables; it's not polymorphic
                    Nothing      -- Kind (use Nothing if no specific kind)
                    -- Constructor
-                   (normalC qname
-                            [return (Bang NoSourceUnpackedness NoSourceStrictness,
-                                     constructorType)])
+                   (normalC qname [lazyWithoutPacking constructorType])
                    -- Derivations
                    [return (DerivClause Nothing [ConT ''Show, ConT ''Eq])]
 
