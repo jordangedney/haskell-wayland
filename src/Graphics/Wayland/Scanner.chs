@@ -64,13 +64,13 @@ lazyWithoutPacking = bangType (bang noSourceUnpackedness noSourceStrictness)
 --   For example, calling `newtypeGenerator ''MyType (conT ''Int)` would yield:
 --       newtype MyType = MyType Int deriving (Show, Eq)
 newtypeGenerator :: Name -> Q Type -> Q Dec
-newtypeGenerator qname resultingType = 
-  newtypeD (pure [])       -- No type constraints
-            qname          -- Newtype name
-            []             -- No type variables; non-polymorphic
-            Nothing        -- No specific kind
-            (normalC qname [lazyWithoutPacking resultingType])  -- Single lazy constructor
-            [derivClause Nothing [conT ''Show, conT ''Eq]]      -- Derives Show and Eq
+newtypeGenerator qname resultingType = newtypeD
+  (pure [])       -- No type constraints
+  qname          -- Newtype name
+  []             -- No type variables; non-polymorphic
+  Nothing        -- No specific kind
+  (normalC qname [lazyWithoutPacking resultingType])  -- Single lazy constructor
+  [derivClause Nothing [conT ''Show, conT ''Eq]]      -- Derives Show and Eq
 
 -- | Wayland data types - exported in the Internal.{Client,Server}Types modules
 generateDataTypes :: ProtocolSpec -> Q [Dec]
@@ -87,7 +87,6 @@ generateDataTypes ps =
 
       typeDec <- newtypeGenerator qname (pure constructorType)
 
-
       versionInstance <- [d|
         instance ProtocolVersion $(conT qname) where
           protocolVersion _ =
@@ -95,27 +94,41 @@ generateDataTypes ps =
 
       return $ typeDec : versionInstance
 
+-- We should only be able to construct "global" objects, which are those that
+-- cannot be obtained via other objects.
+-- The following code picks out these global interfaces.
+getGlobalInterfaces :: ProtocolSpec -> [Interface]
+getGlobalInterfaces ps =
+  let messageCreatesIface child msg =
+        any isCreatingArgument (messageArguments msg)
+        where isCreatingArgument (_, NewIdArg _ x, _) = x == interfaceName child
+              isCreatingArgument _ = False
+
+      interfaceCreatesIface child parent =
+        any (messageCreatesIface child) (interfaceRequests parent)
+
+      protocolCreatesIface child =
+        any (interfaceCreatesIface child) (protocolInterfaces ps)
+
+      isGlobalInterface iface =
+        interfaceName iface /= "wl_display" && not (protocolCreatesIface iface)
+  in filter isGlobalInterface (protocolInterfaces ps)
+
 -- | The wayland registry allows one to construct global objects.
 --   Its API is in wayland.xml, but that API is type-unsafe, so we construct the
 --   the bindings explicitly here.
+--
+-- From the wayland header files (for reference):
+--
+-- static inline void * wl_registry_bind(struct wl_registry *wl_registry, uint32_t name, const struct wl_interface *interface, uint32_t version)
+--
+-- id = wl_proxy_marshal_constructor((struct wl_proxy *) wl_registry, WL_REGISTRY_BIND, interface, name, interface->name, version, NULL);
+--
+-- struct wl_proxy * wl_proxy_marshal_constructor(struct wl_proxy *proxy, uint32_t opcode, const struct wl_interface *interface, ...)
+--
 generateRegistryBind :: ProtocolSpec -> ProcessWithExports [Dec]
 generateRegistryBind ps = do
-  -- We should only be able to construct "global" objects, which are those that cannot be obtained via other objects.
-  -- The following code picks out these global interfaces.
-  let messageCreatesIface child msg = any (\ argument ->
-        case argument of
-          (_, NewIdArg _ x, _) -> x == interfaceName child
-          _                                        -> False)
-        (messageArguments msg)
-      interfaceCreatesIface child parent = any (messageCreatesIface child) (interfaceRequests parent)
-      protocolCreatesIface child = any (interfaceCreatesIface child) (protocolInterfaces ps)
-      globalInterfaces = filter (not.protocolCreatesIface) $ filter (\iface -> interfaceName iface /= "wl_display") (protocolInterfaces ps)
-
-  -- From the wayland header files (for reference):
-  -- static inline void * wl_registry_bind(struct wl_registry *wl_registry, uint32_t name, const struct wl_interface *interface, uint32_t version)
-  -- id = wl_proxy_marshal_constructor((struct wl_proxy *) wl_registry, WL_REGISTRY_BIND, interface, name, interface->name, version, NULL);
-  -- struct wl_proxy * wl_proxy_marshal_constructor(struct wl_proxy *proxy, uint32_t opcode, const struct wl_interface *interface, ...)
-  liftM concat $ sequence $ map registryBindInterface globalInterfaces
+  liftM concat $ sequence $ map registryBindInterface (getGlobalInterfaces ps)
     where
       registryBindInterface :: Interface -> ProcessWithExports [Dec]
       registryBindInterface iface = do
@@ -124,25 +137,39 @@ generateRegistryBind ps = do
             internalCName = mkName $ "wl_registry_" ++ iname ++ "_c_bind"
             exposeName = registryBindName pname iname
 
-        fore <- lift $ forImpD cCall unsafe "wl_proxy_marshal_constructor" internalCName [t|$(conT $ mkName "Registry") -> {#type uint32_t#} -> CInterface -> CUInt -> Ptr CChar -> CUInt -> Ptr () -> IO $(conT $ mkName $ interfaceTypeName pname iname) |]
-        exposureDec <- lift $
-          [d|
-            $(varP $ mkName exposeName) =
-              \ reg name strname version ->
-                withCString strname $
-                  \ cstr ->
-                    $(varE internalCName)
-                      reg
-                      0
-                      $(varE $ interfaceCInterfaceName pname iname)
-                      (fromIntegral (name::Word))
-                      cstr
-                      (fromIntegral (version::Word))
-                      nullPtr
-          |]
+            generateTypeSig =
+              [t| $(conT $ mkName "Registry") ->
+                  {#type uint32_t#} ->
+                  CInterface ->
+                  CUInt ->
+                  Ptr CChar ->
+                  CUInt ->
+                  Ptr () ->
+                  IO $(conT $ mkName $ interfaceTypeName pname iname) |]
+
+            foo =
+              [d| $(varP $ mkName exposeName) =
+                    \ reg name strname version ->
+                      withCString strname $
+                        \ cstr ->
+                          $(varE internalCName)
+                            reg
+                            0
+                            $(varE $ interfaceCInterfaceName pname iname)
+                            (fromIntegral (name::Word))
+                            cstr
+                            (fromIntegral (version::Word))
+                            nullPtr
+              |]
+
+        fore <- lift $
+          forImpD cCall unsafe "wl_proxy_marshal_constructor" internalCName
+          generateTypeSig
+
+        exposureDec <- lift $ foo
+
         export exposeName
         return $ fore : exposureDec
-
 
 -- | Wayland has an "enum" type argument for messages. Here, we generate the
 --   corresponding Haskell types. Note that wayland-style enums might not
@@ -178,7 +205,7 @@ generateEnums ps =
 
               -- Define a Haskell value for each enum entry
               mkHaskellDec :: (Name, Integer) -> Q Dec
-              mkHaskellDec (name, val) = 
+              mkHaskellDec (name, val) =
                 valD (varP name) (normalB (conE qname `appE` litE (integerL val))) []
 
           -- Generate the enum newtype declaration and the value declarations
