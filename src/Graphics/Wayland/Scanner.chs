@@ -65,17 +65,17 @@ lazyWithoutPacking = bangType (bang noSourceUnpackedness noSourceStrictness)
 --       newtype MyType = MyType Int deriving (Show, Eq)
 newtypeGenerator :: Name -> Q Type -> Q Dec
 newtypeGenerator qname resultingType = newtypeD
-  (pure [])       -- No type constraints
+  (pure [])      -- No type constraints
   qname          -- Newtype name
   []             -- No type variables; non-polymorphic
   Nothing        -- No specific kind
-  (normalC qname [lazyWithoutPacking resultingType])  -- Single lazy constructor
-  [derivClause Nothing [conT ''Show, conT ''Eq]]      -- Derives Show and Eq
+  (normalC qname [lazyWithoutPacking resultingType]) -- Single lazy constructor
+  [derivClause Nothing [conT ''Show, conT ''Eq]]     -- Derives Show and Eq
 
 -- | Wayland data types - exported in the Internal.{Client,Server}Types modules
 generateDataTypes :: ProtocolSpec -> Q [Dec]
 generateDataTypes ps =
-  liftM concat $ sequence $ map generateInterface (protocolInterfaces ps)
+  liftM concat $ traverse generateInterface (protocolInterfaces ps)
   where
     generateInterface :: Interface -> Q [Dec]
     generateInterface iface = do
@@ -128,7 +128,7 @@ getGlobalInterfaces ps =
 --
 generateRegistryBind :: ProtocolSpec -> ProcessWithExports [Dec]
 generateRegistryBind ps = do
-  liftM concat $ sequence $ map registryBindInterface (getGlobalInterfaces ps)
+  liftM concat $ traverse registryBindInterface (getGlobalInterfaces ps)
     where
       registryBindInterface :: Interface -> ProcessWithExports [Dec]
       registryBindInterface iface = do
@@ -232,7 +232,7 @@ generateCInterfaceDecs ps = mapM bindCInterface (protocolInterfaces ps)
 -- | This function generates bindings to the "core" message passing API:
 --   it binds to the actual message senders.
 generateMethods :: ProtocolSpec -> ServerClient -> ProcessWithExports [Dec]
-generateMethods ps sc = liftM concat $ sequence $ map generateInterface $ filter (\iface -> if sc == Server then interfaceName iface /= "wl_display" else True) $ protocolInterfaces ps where
+generateMethods ps sc = liftM concat $ traverse generateInterface $ filter (\iface -> if sc == Server then interfaceName iface /= "wl_display" else True) $ protocolInterfaces ps where
   generateInterface :: Interface -> ProcessWithExports [Dec]
   generateInterface iface = do
     -- Okay, we have to figure out some stuff. There is a tree of possibilities:
@@ -355,7 +355,7 @@ generateMethods ps sc = liftM concat $ sequence $ map generateInterface $ filter
 
 applyAtPosition :: ExpQ -> ExpQ -> Int -> ExpQ
 applyAtPosition fun arg pos = do
-  vars <- sequence $ map (\ _ -> newName "somesecretnameyoushouldntmesswith___") [0..(pos-1)]
+  vars <- traverse (\ _ -> newName "somesecretnameyoushouldntmesswith___") [0..(pos-1)]
   lamE (map varP vars) $
     appsE $ fun : (map varE vars) ++ [arg]
 
@@ -363,7 +363,7 @@ preComposeAt :: ExpQ -> ExpQ -> Int -> Int -> ExpQ
 preComposeAt fun arg pos numArgs
   | pos > numArgs  = error "programming error"
 preComposeAt fun arg pos numArgs = do
-  vars <- sequence $ map (\ _ -> newName "yetanothernewvariablepleasedonttouchme___") [0..numArgs]
+  vars <- traverse (\ _ -> newName "yetanothernewvariablepleasedonttouchme___") [0..numArgs]
   lamE (map varP vars) $
     [e|do
       preCompVal <- $arg $(varE $ vars !! pos)
@@ -373,7 +373,7 @@ preComposeAt fun arg pos numArgs = do
 -- | Wayland stores callback functions in a C struct. Here we generate the
 --   Haskell equivalent of those structs.
 generateListenerTypes :: ProtocolSpec -> ServerClient -> Q [Dec]
-generateListenerTypes sp sc = sequence $ map generateListenerType $
+generateListenerTypes sp sc = traverse generateListenerType $
      filter (\iface -> 0 < (length $ case sc of
        Server -> interfaceRequests iface
        Client -> interfaceEvents iface)) $ protocolInterfaces sp
@@ -400,7 +400,7 @@ generateListenerTypes sp sc = sequence $ map generateListenerType $
           let name = mkName $ mkMessageName msg
           ltype <- mkListenerType msg
           return (name, Bang NoSourceUnpackedness NoSourceStrictness, ltype)
-      recArgs <- sequence $ map mkListenerConstr messages
+      recArgs <- traverse mkListenerConstr messages
       return $ DataD [] typeName [] Nothing [RecC typeName recArgs] []
 
 -- | For each interface, generate the callback API.
@@ -408,7 +408,7 @@ generateListenerMethods :: ProtocolSpec -> ServerClient -> ProcessWithExports [D
 generateListenerMethods sp sc = do
   let pname = protocolName sp
 
-  interfaces <- liftM concat $ sequence $ map (\iface -> generateListener sp iface sc) $
+  interfaces <- liftM concat $ traverse (\iface -> generateListener sp iface sc) $
     filter (\iface -> 0 < (length $ case sc of
                                       Server -> interfaceRequests iface
                                       Client -> interfaceEvents iface)) $ protocolInterfaces sp
@@ -570,7 +570,7 @@ generateListener sp iface sc = do
       |]
 
 
-  some <- lift $ sequence $ map wrapperDec messages
+  some <- lift $ traverse wrapperDec messages
 
   other <- lift $ instanceDec
   more <- lift $ foreignDec
