@@ -75,7 +75,7 @@ newtypeGenerator qname resultingType = newtypeD
 -- | Wayland data types - exported in the Internal.{Client,Server}Types modules
 generateDataTypes :: ProtocolSpec -> Q [Dec]
 generateDataTypes ps =
-  liftM concat $ traverse generateInterface (protocolInterfaces ps)
+  concat <$> traverse generateInterface (protocolInterfaces ps)
   where
     generateInterface :: Interface -> Q [Dec]
     generateInterface iface = do
@@ -128,7 +128,7 @@ getGlobalInterfaces ps =
 --
 generateRegistryBind :: ProtocolSpec -> ProcessWithExports [Dec]
 generateRegistryBind ps = do
-  liftM concat $ traverse registryBindInterface (getGlobalInterfaces ps)
+  concat <$> traverse registryBindInterface (getGlobalInterfaces ps)
     where
       registryBindInterface :: Interface -> ProcessWithExports [Dec]
       registryBindInterface iface = do
@@ -605,7 +605,7 @@ generateClientExports ps = do
   (_, registryNames) <- runWriterT $ generateRegistryBind ps
   let names = methodNames ++ listenerNames ++ registryNames
 
-  liftM concat $ mapM nameToDec names
+  concat <$> mapM nameToDec names
     where
       nameToDec :: String -> Q [Dec]
       nameToDec name = [d|$(varP $ mkName name) = $(varE $ mkName $ "Import." ++ name) |]
@@ -636,7 +636,7 @@ generateServerExports ps = do
   (_, listenerNames) <- runWriterT $ generateListenerMethods ps Server
   let names = methodNames ++ listenerNames
 
-  liftM concat $ mapM nameToDec names
+  concat <$> mapM nameToDec names
     where
       nameToDec :: String -> Q [Dec]
       nameToDec name = [d|$(varP $ mkName name) = $(varE $ mkName $ "Import." ++ name) |]
