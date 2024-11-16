@@ -94,25 +94,115 @@ generateDataTypes ps =
 
       return $ typeDec : versionInstance
 
--- We should only be able to construct "global" objects, which are those that
--- cannot be obtained via other objects.
--- The following code picks out these global interfaces.
+-- | We should only be able to construct "global" objects, which are those that
+--   cannot be obtained via other objects.
+--   The following code picks out these global interfaces.
 getGlobalInterfaces :: ProtocolSpec -> [Interface]
-getGlobalInterfaces ps =
-  let messageCreatesIface child msg =
-        any isCreatingArgument (messageArguments msg)
-        where isCreatingArgument (_, NewIdArg _ x, _) = x == interfaceName child
-              isCreatingArgument _ = False
+getGlobalInterfaces ps = filter isGlobalInterface (protocolInterfaces ps) where
+  messageCreatesIface child msg = any isCreatingArgument (messageArguments msg)
+    where isCreatingArgument (_, NewIdArg _ x, _) = x == interfaceName child
+          isCreatingArgument _ = False
 
-      interfaceCreatesIface child parent =
-        any (messageCreatesIface child) (interfaceRequests parent)
+  interfaceCreatesIface child parent =
+    any (messageCreatesIface child) (interfaceRequests parent)
 
-      protocolCreatesIface child =
-        any (interfaceCreatesIface child) (protocolInterfaces ps)
+  protocolCreatesIface child =
+    any (interfaceCreatesIface child) (protocolInterfaces ps)
 
-      isGlobalInterface iface =
-        interfaceName iface /= "wl_display" && not (protocolCreatesIface iface)
-  in filter isGlobalInterface (protocolInterfaces ps)
+  isGlobalInterface iface =
+    interfaceName iface /= "wl_display" && not (protocolCreatesIface iface)
+
+
+-- | Generates the type signature for the foreign function used to
+--   bind Wayland registry objects.
+--   The generated signature corresponds to the Wayland function:
+--
+--     void * wl_registry_bind(struct wl_registry *wl_registry,
+--                             uint32_t name,
+--                             const struct wl_interface *interface,
+--                             uint32_t version);
+--
+--   In Haskell, this maps to a function that takes:
+--     1. A pointer to a Wayland Registry (`Registry`)
+--     2. An ID (`uint32_t`) for the object
+--     3. The interface type (`CInterface`)
+--     4. The version of the protocol (`CUInt`)
+--     5. A pointer to the interface name (`Ptr CChar`)
+--     6. The version number (`CUInt`)
+--     7. A placeholder for additional data (`Ptr ()`, often null)
+--   and returns:
+--     An IO action that produces a pointer to the bound object.
+--
+-- Example:
+--
+-- Suppose we are binding a `wl_compositor` object. The generated
+-- type signature will look like:
+--
+--   Registry -> Word32 -> CInterface -> CUInt ->
+--   Ptr CChar -> CUInt -> Ptr () -> IO Compositor
+--
+-- This signature is used to declare the foreign import for the
+-- binding function:
+--
+--   foreign import ccall unsafe "wl_registry_bind"
+--     wl_registry_wl_compositor_c_bind ::
+--       Registry -> Word32 -> CInterface -> CUInt ->
+--       Ptr CChar -> CUInt -> Ptr () -> IO Compositor
+generateTypeSig :: Name -> Q Type
+generateTypeSig interfaceType =
+  [t| $(conT $ mkName "Registry") -> -- Registry: the WL registry
+      {#type uint32_t#} -> -- ObjectID: the object being bound
+      CInterface -> -- Interface: the type of the object to bind
+      CUInt -> -- Protocol version: compatibility version
+      Ptr CChar -> -- Interface name: string pointer to the name
+      CUInt -> -- Interface Version (?): version
+      Ptr () -> -- Additional data: usually null
+      IO $(conT interfaceType) -- Result: a ptr to the  bound object
+  |]
+
+-- | Generates the Haskell wrapper for the foreign function that
+--   binds a Wayland registry object.  The wrapper takes
+--   human-readable arguments, such as strings for the interface
+--   name, and marshals them into the format required by the
+--   foreign C function.
+--
+-- Example:
+--
+-- If the interface is `wl_compositor` and `exposeName` is
+-- `registryBindWlCompositor`, the generated wrapper will be:
+--
+-- exposeName: The name of the Haskell function to generate
+-- (e.g., "registryBindWlCompositor").
+-- internalCName: The name of the foreign function imported from C
+-- (e.g., "wl_registry_wl_compositor_c_bind")
+-- interfaceCName: The C symbol representing the Wayland interface
+-- (e.g., "wl_compositor_interface").
+--
+-- registryBindWlCompositor ::
+-- Registry -> Word32 -> String -> Word32 -> IO Compositor
+-- registryBindWlCompositor reg name strname version =
+--   withCString strname $ \cstr ->
+--     wl_registry_wl_compositor_c_bind
+--       reg
+--       0
+--       wl_compositor_interface
+--       (fromIntegral name)
+--       cstr
+--       (fromIntegral version)
+generateWrapper :: String -> Name -> Name -> Q [Dec]
+generateWrapper exposeName internalCName interfaceCName = [d|
+  $(varP $ mkName exposeName) =
+    \ reg name strname version ->
+      withCString strname $ \ cstr ->
+        $(varE internalCName)
+          reg                      -- The Wayland registry object
+          0                        -- Opcode (0 for bind operations)
+          $(varE $ interfaceCName) -- Interface name (~ wl_compositor_interface)
+          (fromIntegral (name :: Word)) -- Global object ID
+          cstr -- Marshaled CString representation of the interface name
+          (fromIntegral (version :: Word)) -- Interface version
+          nullPtr -- Additional arguments (not used here)
+  |]
 
 -- | The wayland registry allows one to construct global objects.
 --   Its API is in wayland.xml, but that API is type-unsafe, so we construct the
@@ -120,55 +210,44 @@ getGlobalInterfaces ps =
 --
 -- From the wayland header files (for reference):
 --
--- static inline void * wl_registry_bind(struct wl_registry *wl_registry, uint32_t name, const struct wl_interface *interface, uint32_t version)
+-- id = wl_proxy_marshal_constructor(
+--     (struct wl_proxy *) wl_registry,
+--     WL_REGISTRY_BIND,
+--     interface,
+--     name,
+--     interface->name,
+--     version,
+--     NULL);
 --
--- id = wl_proxy_marshal_constructor((struct wl_proxy *) wl_registry, WL_REGISTRY_BIND, interface, name, interface->name, version, NULL);
---
--- struct wl_proxy * wl_proxy_marshal_constructor(struct wl_proxy *proxy, uint32_t opcode, const struct wl_interface *interface, ...)
+-- struct wl_proxy * wl_proxy_marshal_constructor(
+--     struct wl_proxy *proxy,
+--     uint32_t opcode,
+--     const struct wl_interface *interface,
+--     ...)
 --
 generateRegistryBind :: ProtocolSpec -> ProcessWithExports [Dec]
 generateRegistryBind ps = do
-  concat <$> traverse registryBindInterface (getGlobalInterfaces ps)
+  concat <$> traverse (registryBindInterface . interfaceName)
+                      (getGlobalInterfaces ps)
     where
-      registryBindInterface :: Interface -> ProcessWithExports [Dec]
-      registryBindInterface iface = do
-        let iname = interfaceName iface
-            pname = protocolName ps
+      pname = protocolName ps
+
+      registryBindInterface :: String -> ProcessWithExports [Dec]
+      registryBindInterface iname = do
+        let exposeName = registryBindName pname iname
             internalCName = mkName $ "wl_registry_" ++ iname ++ "_c_bind"
-            exposeName = registryBindName pname iname
-
-            generateTypeSig =
-              [t| $(conT $ mkName "Registry") ->
-                  {#type uint32_t#} ->
-                  CInterface ->
-                  CUInt ->
-                  Ptr CChar ->
-                  CUInt ->
-                  Ptr () ->
-                  IO $(conT $ mkName $ interfaceTypeName pname iname) |]
-
-            foo =
-              [d| $(varP $ mkName exposeName) =
-                    \ reg name strname version ->
-                      withCString strname $
-                        \ cstr ->
-                          $(varE internalCName)
-                            reg
-                            0
-                            $(varE $ interfaceCInterfaceName pname iname)
-                            (fromIntegral (name::Word))
-                            cstr
-                            (fromIntegral (version::Word))
-                            nullPtr
-              |]
 
         fore <- lift $
           forImpD cCall unsafe "wl_proxy_marshal_constructor" internalCName
-          generateTypeSig
+          (generateTypeSig $ mkName $ interfaceTypeName pname iname)
 
-        exposureDec <- lift $ foo
+        exposureDec <- lift $
+          (generateWrapper exposeName
+                           internalCName
+                           (interfaceCInterfaceName pname iname))
 
         export exposeName
+
         return $ fore : exposureDec
 
 -- | Wayland has an "enum" type argument for messages. Here, we generate the
