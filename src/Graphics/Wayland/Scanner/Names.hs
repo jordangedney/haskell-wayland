@@ -43,8 +43,8 @@ enumEntryHaskName pname iname ename entryName =
 interfaceTypeName :: ProtocolName -> InterfaceName -> String
 interfaceTypeName pname iname = capitalize $ haskifyInterfaceName pname iname
 
-interfaceCInterfaceName :: ProtocolName -> InterfaceName -> Name
-interfaceCInterfaceName _ iname = mkName $ iname ++ "_c_interface"
+interfaceCInterfaceName :: InterfaceName -> Name
+interfaceCInterfaceName iname = mkName $ iname ++ "_c_interface"
 
 enumTypeName :: ProtocolName -> InterfaceName -> EnumName -> Name
 enumTypeName pname iname ename = mkName $ capitalize $ haskifyInterfaceName pname iname ++ capitalize (toCamel ename)
