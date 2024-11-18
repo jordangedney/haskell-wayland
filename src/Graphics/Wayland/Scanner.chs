@@ -112,7 +112,6 @@ getGlobalInterfaces ps = filter isGlobalInterface (protocolInterfaces ps) where
   isGlobalInterface iface =
     interfaceName iface /= "wl_display" && not (protocolCreatesIface iface)
 
-
 -- | Generates the type signature for the foreign function used to
 --   bind Wayland registry objects.
 --   The generated signature corresponds to the Wayland function:
@@ -178,6 +177,8 @@ generateTypeSig interfaceType =
 -- interfaceCName: The C symbol representing the Wayland interface
 -- (e.g., "wl_compositor_interface").
 --
+-- Note: the type isn't generated, but its still shown for clarity.
+--
 -- registryBindWlCompositor ::
 -- Registry -> Word32 -> String -> Word32 -> IO Compositor
 -- registryBindWlCompositor reg name strname version =
@@ -234,21 +235,30 @@ generateRegistryBind ps = do
 
       registryBindInterface :: String -> ProcessWithExports [Dec]
       registryBindInterface iname = do
-        let exposeName = registryBindName pname iname
+        let exposedName = registryBindName pname iname
             internalCName = mkName $ "wl_registry_" ++ iname ++ "_c_bind"
 
-        fore <- lift $
-          forImpD cCall unsafe "wl_proxy_marshal_constructor" internalCName
-          (generateTypeSig $ mkName $ interfaceTypeName pname iname)
+        -- Example output:
+        -- foreign import ccall unsafe "wl_proxy_marshal_constructor"
+        --   wl_registry_wl_compositor_c_bind
+        --   :: Registry -> Word32 -> CInterface -> Word32 -> Ptr CChar -> Word32
+        --   -> Ptr () -> IO WaylandWlCompositor
+        foreignImport <- lift $
+          forImpD -- define foreign import
+          cCall -- with the c calling convention
+          unsafe -- which does not call back into haskell
+          "wl_proxy_marshal_constructor" -- the c function being imported
+          internalCName -- the haskell name for the imported function
+          (generateTypeSig $ mkName $ interfaceTypeName pname iname) -- type sig
 
         exposureDec <- lift $
-          (generateWrapper exposeName
+          (generateWrapper exposedName
                            internalCName
                            (interfaceCInterfaceName pname iname))
 
-        export exposeName
+        export exposedName
 
-        return $ fore : exposureDec
+        return $ foreignImport : exposureDec
 
 -- | Wayland has an "enum" type argument for messages. Here, we generate the
 --   corresponding Haskell types. Note that wayland-style enums might not
