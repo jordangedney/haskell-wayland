@@ -491,10 +491,10 @@ preComposeAt fun arg pos numArgs = do
 -- | Wayland stores callback functions in a C struct. Here we generate the
 --   Haskell equivalent of those structs.
 generateListenerTypes :: ProtocolSpec -> ServerClient -> Q [Dec]
-generateListenerTypes sp sc = traverse generateListenerType $
+generateListenerTypes ps sc = traverse generateListenerType $
      filter (\iface -> 0 < (length $ case sc of
        Server -> interfaceRequests iface
-       Client -> interfaceEvents iface)) $ protocolInterfaces sp
+       Client -> interfaceEvents iface)) $ protocolInterfaces ps
   where
     generateListenerType :: Interface -> Q Dec
     generateListenerType iface = do
@@ -503,14 +503,14 @@ generateListenerTypes sp sc = traverse generateListenerType $
         messages = case sc of
                    Server -> interfaceRequests iface
                    Client -> interfaceEvents iface
-        pname = protocolName sp
+        pname = protocolName ps
         iname = interfaceName iface
         typeName :: Name
         typeName = messageListenerTypeName sc pname iname
         mkListenerType :: Message -> TypeQ
         mkListenerType msg = case sc of
-                  Server -> [t|Util.Client -> $(waylandInterfaceType sp iface) -> $(genMessageHaskType Nothing $ messageArguments msg)|]  -- see large comment above
-                  Client -> [t|$(waylandInterfaceType sp iface) -> $(genMessageHaskType Nothing $ messageArguments msg)|]
+                  Server -> [t|Util.Client -> $(waylandInterfaceType ps iface) -> $(genMessageHaskType Nothing $ messageArguments msg)|]  -- see large comment above
+                  Client -> [t|$(waylandInterfaceType ps iface) -> $(genMessageHaskType Nothing $ messageArguments msg)|]
         mkMessageName :: Message -> String
         mkMessageName msg = messageListenerMessageName sc pname iname (messageName msg)
         mkListenerConstr :: Message -> VarStrictTypeQ
@@ -523,13 +523,13 @@ generateListenerTypes sp sc = traverse generateListenerType $
 
 -- | For each interface, generate the callback API.
 generateListenerMethods :: ProtocolSpec -> ServerClient -> ProcessWithExports [Dec]
-generateListenerMethods sp sc = do
-  let pname = protocolName sp
+generateListenerMethods ps sc = do
+  let pname = protocolName ps
 
-  interfaces <- liftM concat $ traverse (\iface -> generateListener sp iface sc) $
+  interfaces <- liftM concat $ traverse (\iface -> generateListener ps iface sc) $
     filter (\iface -> 0 < (length $ case sc of
                                       Server -> interfaceRequests iface
-                                      Client -> interfaceEvents iface)) $ protocolInterfaces sp
+                                      Client -> interfaceEvents iface)) $ protocolInterfaces ps
 
   -- For a new_id type argument, server-side, we are passed raw new_id's.
   -- Since the only sensible thing to do is to create the requested object,
@@ -541,17 +541,17 @@ generateListenerMethods sp sc = do
         map (\ iface -> do
           let iname = interfaceName iface
               internalCName = mkName $ pname ++ "_" ++ iname ++ "_c_resource_create"
-          foreignDec <- foreignC "wl_resource_create" internalCName [t|Util.Client -> CInterface -> CInt -> {#type uint32_t#} -> IO $(waylandInterfaceType sp iface) |]
+          foreignDec <- foreignC "wl_resource_create" internalCName [t|Util.Client -> CInterface -> CInt -> {#type uint32_t#} -> IO $(waylandInterfaceType ps iface) |]
           neatDec <- [d|$(varP $ interfaceResourceCreator pname iname) = \ client id ->
                           $(varE internalCName) client $(varE $ interfaceCInterfaceName iname) $(litE $ IntegerL $ fromIntegral $ interfaceVersion iface) id|]
           return $ foreignDec : neatDec
-          ) (protocolInterfaces sp)
+          ) (protocolInterfaces ps)
   return $ interfaces ++ resourceCreators
 
 
 -- | Generate a specific interface's callback API
 generateListener :: ProtocolSpec -> Interface -> ServerClient -> ProcessWithExports [Dec]
-generateListener sp iface sc = do
+generateListener ps iface sc = do
   -- Tree of possibilities:
   -- - Server
   --   => call it an Implementation or Interface. first argument is the client, second is the resource
@@ -568,8 +568,8 @@ generateListener sp iface sc = do
   --   => the type you'd expect
   let -- declare a Listener or Interface type for this interface
     typeName :: Name
-    typeName = messageListenerTypeName sc (protocolName sp) (interfaceName iface)
-    pname = protocolName sp
+    typeName = messageListenerTypeName sc (protocolName ps) (interfaceName iface)
+    pname = protocolName ps
     iname :: String
     iname = interfaceName iface
     messages :: [Message]
@@ -626,8 +626,8 @@ generateListener sp iface sc = do
 
     -- FunPtr wrapper. Wraps a Haskell function into a function that can be called by C (ie. wayland).
     mkListenerCType msg = case sc of
-              Server -> [t|Util.Client -> $(waylandInterfaceType sp iface) -> $(genMessageWeirdCType Nothing $ messageArguments msg)|]  -- see large comment above
-              Client -> [t|Ptr () -> $(waylandInterfaceType sp iface) -> $(genMessageCType Nothing $ messageArguments msg)|]
+              Server -> [t|Util.Client -> $(waylandInterfaceType ps iface) -> $(genMessageWeirdCType Nothing $ messageArguments msg)|]  -- see large comment above
+              Client -> [t|Ptr () -> $(waylandInterfaceType ps iface) -> $(genMessageCType Nothing $ messageArguments msg)|]
     wrapperName msg = messageListenerWrapperName sc iname (messageName msg)
     wrapperDec msg = foreignC "wrapper" (wrapperName msg) [t|$(mkListenerCType msg) -> IO (FunPtr ($(mkListenerCType msg))) |]
 
@@ -651,10 +651,10 @@ generateListener sp iface sc = do
                        "wl_resource_set_implementation"
                        foreignName
                        [t|
-                         $(waylandInterfaceType sp iface)
+                         $(waylandInterfaceType ps iface)
                          -> (Ptr $(conT $ typeName))
                          -> (Ptr ())
-                         -> FunPtr ($(waylandInterfaceType sp iface) -> IO ())
+                         -> FunPtr ($(waylandInterfaceType ps iface) -> IO ())
                          -> IO ()
                          |]
                    -- int wl_proxy_add_listener(struct wl_proxy *proxy,
@@ -666,7 +666,7 @@ generateListener sp iface sc = do
                        "wl_proxy_add_listener"
                        foreignName
                        [t|
-                         $(waylandInterfaceType sp iface)
+                         $(waylandInterfaceType ps iface)
                          -> (Ptr $(conT $ typeName))
                          -> (Ptr ())
                          -> IO CInt
