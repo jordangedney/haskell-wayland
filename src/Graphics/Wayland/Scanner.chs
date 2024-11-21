@@ -347,6 +347,172 @@ generateCInterfaceDecs ps = mapM bindCInterface (protocolInterfaces ps) where
       (interfaceCInterfaceName (interfaceName iface))
       [t| CInterface|] -- pointer is fixed
 
+-- Bind to an individual message
+generateMessage :: ProtocolSpec -> ServerClient -> Interface -> Name -> Int -> Message
+                 -> ProcessWithExports [Dec]
+-- index in the list used for wl_proxy_marshal arguments
+generateMessage ps sc iface destroyName idx msg =
+  -- Okay, we have to figure out some stuff. There is a tree of possibilities:
+  -- - Server
+  --   => this is actually an easy case. every message is just some call to
+  --   wl_resource_post_event
+  -- - Client
+  -- - - if a message has more than one new_id argument, skip (or undefined
+  -- - - for safety?)
+  -- - - if a message has a single untyped new_id argument (ie now interface
+  -- - - attribute in the XML), then there is some complicated C
+  -- - - implementation we won't be copying, skip
+  -- - - if a message has a single typed new_id argument, then this is the
+  -- - - return value of wl_proxy_marshal_constructor
+  --     => pass a bunch of constants in the initial arguments. pass NULL in
+  --     its argument position
+  -- - - if a message has no new_id arguments, we are calling wl_proxy_marshal
+  --   => for each argument EXCEPT new_id's(where we would pass NULL as
+  --   discussed), pass that argument
+  -- Note that wl_resource_post_event, wl_proxy_marshal and
+  -- wl_proxy_marshal_constructor all have the message index in the SECOND
+  -- position: the object corresponding to the message is the first! So the
+  -- important thing to remember is that our pretty Haskell function
+  -- representations have some arguments inserted in between.
+  --
+  -- Further, in the Client case, we have to make a destructor. Some messages
+  -- can have type="destructor" in the XML protocol files.
+  -- - there is no message typed destructor with name "destroy"
+  -- - - if the interface is wl_display, don't do anything
+  -- - - if the interface is NOT wl_display
+  --     => generate a new function "destroy", a synonnym for wl_proxy_destroy
+  -- - otherwise, for each message typed destructor (possibly including "destroy")
+  --   => call wl_proxy_marshal as normal, and *also* wl_proxy_destroy on this
+  --   proxy (sole argument)
+  -- - the case of having a "destroy", but no destructor, is illegal: iow, if
+  -- - you have a "destroy", then you must also have a destructor request.
+  --   the C scanner allows you to have a non-destructor "destroy", but I
+  --   doubt that's the intention, so I'll make that undefined.
+  -- "dirty" name of internal raw binding to C function
+  let pname = protocolName ps
+      iname = interfaceName iface
+      mname = messageName msg
+
+      hname = case sc of
+                Server -> eventHaskName pname iname mname
+                Client -> requestHaskName pname iname mname
+      internalCName =
+        case sc of
+          Server ->
+            mkName $ "wl_rpe_" ++ interfaceName iface ++ "_" ++ messageName msg
+          Client ->
+            mkName $ "wl_pm_" ++ interfaceName iface ++ "_" ++ messageName msg
+
+  in case sc of
+        Server -> do
+          -- From the wayland header files:
+          -- void wl_resource_post_event(struct wl_resource *resource,
+          --                             uint32_t opcode, ...);
+          cdec <- lift $
+            foreignC "wl_resource_post_event"
+                    internalCName
+                    [t|$(waylandInterfaceType ps iface)
+                        -> {#type uint32_t#}
+                        -> $(genMessageCType Nothing (messageArguments msg)) |]
+
+          resourceName <- lift $ newName "resourceInternalName___"
+
+          let messageIndexApplied =
+                applyAtPosition (varE internalCName)
+                                (litE $ IntegerL $ fromIntegral idx)
+                                1
+
+              resourceApplied = [e|$messageIndexApplied $(varE resourceName)|]
+
+              (pats,fun) = argTypeMarshaller (messageArguments msg) resourceApplied
+
+          declist <- lift $
+            [d|$(varP $ mkName hname) = $(LamE (VarP resourceName : pats) <$> fun)|]
+
+          export hname
+
+          return (cdec : declist)
+
+        Client -> do
+          -- See tree of possibilities above
+          let numNewIds = sum $ map (fromEnum . isNewId) $ messageArguments msg
+              argsWithoutNewId =
+                filter (\arg -> not $ isNewId arg) (messageArguments msg)
+              returnArgument =
+                head $ filter (\arg -> isNewId arg) (messageArguments msg)
+              returnName = let (_, NewIdArg _ theName, _) = returnArgument
+                          in theName
+              returnType = [t|IO $(argTypeToCType returnArgument)|]
+          cdec <- lift $
+            case numNewIds of
+              -- void wl_proxy_marshal(struct wl_proxy *proxy, uint32_t opcode, ...)
+              0 -> foreignC "wl_proxy_marshal"
+                            internalCName
+                            [t|$(waylandInterfaceType ps iface)
+                              -> {#type uint32_t#}
+                              -> $(genMessageCType Nothing (messageArguments msg)) |]
+                -- struct wl_proxy * wl_proxy_marshal_constructor(struct
+                -- wl_proxy *proxy, uint32_t opcode, const struct
+                -- wl_interface *interface, ...)
+              1 -> foreignC "wl_proxy_marshal_constructor"
+                            internalCName
+                            [t|$(waylandInterfaceType ps iface)
+                                -> {#type uint32_t#}
+                                -> CInterface
+                                -> $(genMessageCType (Just returnType)
+                                                    (messageArguments msg)) |]
+
+
+          proxyName <- lift $ newName "proxyInternalName___"
+
+          let messageIndexApplied =
+                applyAtPosition (varE internalCName)
+                                (litE $ IntegerL $ fromIntegral idx)
+                                1
+              constructorApplied =
+                case numNewIds of
+                  0 -> messageIndexApplied
+                  1 -> applyAtPosition messageIndexApplied
+                                      (varE $ interfaceCInterfaceName (returnName))
+                                      1
+              proxyApplied = [e|$constructorApplied $(varE proxyName)|]
+              makeArgumentNullPtr =
+                  let argIdx = fromJust $ findIndex isNewId (messageArguments msg)
+                      arg' = (messageArguments msg) !! argIdx
+                      msgName = let (_,NewIdArg itsname _,_) = arg'
+                                in itsname
+                  in [e|$(conE msgName) nullPtr|]
+
+              newIdNullInserted =
+                case numNewIds of
+                  0 -> proxyApplied
+                  1 -> applyAtPosition proxyApplied
+                                      makeArgumentNullPtr
+                                        (fromJust $ findIndex isNewId
+                                                              (messageArguments msg))
+              finalCall = newIdNullInserted
+              (pats, fun) = argTypeMarshaller (argsWithoutNewId) finalCall
+
+          declist <- lift $
+            [d|$(varP $ mkName hname) =
+                $(LamE (VarP proxyName : pats)
+                  <$> [e|do
+                        -- Let's start by either calling wl_proxy_marshal or
+                        -- wl_proxy_marshal_constructor
+                        retval <- $fun
+
+                        -- possibly do some destruction here?
+                        $(case messageIsDestructor msg of
+                          -- do nothing (will hopefully get optimized away)
+                            False -> [e|return retval|]
+                            True -> [e|$(varE destroyName) $(varE proxyName) |])
+
+                        return retval
+                        |])|]
+
+          export hname
+          return (cdec : declist)
+
 -- | This function generates bindings to the "core" message passing API:
 --   it binds to the actual message senders.
 generateMethods :: ProtocolSpec -> ServerClient -> ProcessWithExports [Dec]
@@ -357,43 +523,6 @@ generateMethods ps sc =
 
   generateInterface :: Interface -> ProcessWithExports [Dec]
   generateInterface iface = do
-    -- Okay, we have to figure out some stuff. There is a tree of possibilities:
-    -- - Server
-    --   => this is actually an easy case. every message is just some call to
-    --   wl_resource_post_event
-    -- - Client
-    -- - - if a message has more than one new_id argument, skip (or undefined
-    -- - - for safety?)
-    -- - - if a message has a single untyped new_id argument (ie now interface
-    -- - - attribute in the XML), then there is some complicated C
-    -- - - implementation we won't be copying, skip
-    -- - - if a message has a single typed new_id argument, then this is the
-    -- - - return value of wl_proxy_marshal_constructor
-    --     => pass a bunch of constants in the initial arguments. pass NULL in
-    --     its argument position
-    -- - - if a message has no new_id arguments, we are calling wl_proxy_marshal
-    --   => for each argument EXCEPT new_id's(where we would pass NULL as
-    --   discussed), pass that argument
-    -- Note that wl_resource_post_event, wl_proxy_marshal and
-    -- wl_proxy_marshal_constructor all have the message index in the SECOND
-    -- position: the object corresponding to the message is the first! So the
-    -- important thing to remember is that our pretty Haskell function
-    -- representations have some arguments inserted in between.
-    --
-    -- Further, in the Client case, we have to make a destructor. Some messages
-    -- can have type="destructor" in the XML protocol files.
-    -- - there is no message typed destructor with name "destroy"
-    -- - - if the interface is wl_display, don't do anything
-    -- - - if the interface is NOT wl_display
-    --     => generate a new function "destroy", a synonnym for wl_proxy_destroy
-    -- - otherwise, for each message typed destructor (possibly including "destroy")
-    --   => call wl_proxy_marshal as normal, and *also* wl_proxy_destroy on this
-    --   proxy (sole argument)
-    -- - the case of having a "destroy", but no destructor, is illegal: iow, if
-    -- - you have a "destroy", then you must also have a destructor request.
-    --   the C scanner allows you to have a non-destructor "destroy", but I
-    --   doubt that's the intention, so I'll make that undefined.
-    -- "dirty" name of internal raw binding to C function
 
     -- bind object destroyers
     let destroyName = mkName $ interfaceName iface ++ "_destructor"
@@ -417,136 +546,9 @@ generateMethods ps sc =
 
     if needsDefaultDestructor then export defaultDestructorName else return ()
 
-    let
-     -- Bind to an individual message
-      generateMessage :: Int -> Message -> ProcessWithExports [Dec]
-      generateMessage idx msg = -- index in the list used for wl_proxy_marshal arguments
-        let pname = protocolName ps
-            iname = interfaceName iface
-            mname = messageName msg
-
-            hname = case sc of
-                      Server -> eventHaskName pname iname mname
-                      Client -> requestHaskName pname iname mname
-            internalCName =
-              case sc of
-                Server ->
-                  mkName $ "wl_rpe_" ++ interfaceName iface ++ "_" ++ messageName msg
-                Client ->
-                  mkName $ "wl_pm_" ++ interfaceName iface ++ "_" ++ messageName msg
-
-        in case sc of
-             Server -> do
-               -- From the wayland header files:
-               -- void wl_resource_post_event(struct wl_resource *resource,
-               --                             uint32_t opcode, ...);
-               cdec <- lift $
-                 foreignC "wl_resource_post_event"
-                          internalCName
-                          [t|$(waylandInterfaceType ps iface)
-                             -> {#type uint32_t#}
-                             -> $(genMessageCType Nothing (messageArguments msg)) |]
-
-               resourceName <- lift $ newName "resourceInternalName___"
-
-               let messageIndexApplied =
-                     applyAtPosition (varE internalCName)
-                                     (litE $ IntegerL $ fromIntegral idx)
-                                     1
-
-                   resourceApplied = [e|$messageIndexApplied $(varE resourceName)|]
-
-                   (pats,fun) = argTypeMarshaller (messageArguments msg) resourceApplied
-
-               declist <- lift $
-                 [d|$(varP $ mkName hname) = $(LamE (VarP resourceName : pats) <$> fun)|]
-
-               export hname
-
-               return (cdec : declist)
-
-             Client -> do
-               -- See tree of possibilities above
-               let numNewIds = sum $ map (fromEnum . isNewId) $ messageArguments msg
-                   argsWithoutNewId =
-                     filter (\arg -> not $ isNewId arg) (messageArguments msg)
-                   returnArgument =
-                     head $ filter (\arg -> isNewId arg) (messageArguments msg)
-                   returnName = let (_, NewIdArg _ theName, _) = returnArgument
-                                in theName
-                   returnType = [t|IO $(argTypeToCType returnArgument)|]
-               cdec <- lift $
-                 case numNewIds of
-                   -- void wl_proxy_marshal(struct wl_proxy *proxy, uint32_t opcode, ...)
-                   0 -> foreignC "wl_proxy_marshal"
-                                 internalCName
-                                 [t|$(waylandInterfaceType ps iface)
-                                    -> {#type uint32_t#}
-                                    -> $(genMessageCType Nothing (messageArguments msg)) |]
-                     -- struct wl_proxy * wl_proxy_marshal_constructor(struct
-                     -- wl_proxy *proxy, uint32_t opcode, const struct
-                     -- wl_interface *interface, ...)
-                   1 -> foreignC "wl_proxy_marshal_constructor"
-                                  internalCName
-                                  [t|$(waylandInterfaceType ps iface)
-                                     -> {#type uint32_t#}
-                                     -> CInterface
-                                     -> $(genMessageCType (Just returnType)
-                                                          (messageArguments msg)) |]
-
-
-               proxyName <- lift $ newName "proxyInternalName___"
-
-               let messageIndexApplied =
-                     applyAtPosition (varE internalCName)
-                                     (litE $ IntegerL $ fromIntegral idx)
-                                      1
-                   constructorApplied =
-                     case numNewIds of
-                       0 -> messageIndexApplied
-                       1 -> applyAtPosition messageIndexApplied
-                                            (varE $ interfaceCInterfaceName (returnName))
-                                            1
-                   proxyApplied = [e|$constructorApplied $(varE proxyName)|]
-                   makeArgumentNullPtr =
-                       let argIdx = fromJust $ findIndex isNewId (messageArguments msg)
-                           arg' = (messageArguments msg) !! argIdx
-                           msgName = let (_,NewIdArg itsname _,_) = arg'
-                                     in itsname
-                       in [e|$(conE msgName) nullPtr|]
-
-                   newIdNullInserted =
-                     case numNewIds of
-                       0 -> proxyApplied
-                       1 -> applyAtPosition proxyApplied
-                                            makeArgumentNullPtr
-                                              (fromJust $ findIndex isNewId
-                                                                    (messageArguments msg))
-                   finalCall = newIdNullInserted
-                   (pats, fun) = argTypeMarshaller (argsWithoutNewId) finalCall
-
-               declist <- lift $
-                 [d|$(varP $ mkName hname) =
-                      $(LamE (VarP proxyName : pats)
-                       <$> [e|do
-                             -- Let's start by either calling wl_proxy_marshal or
-                             -- wl_proxy_marshal_constructor
-                             retval <- $fun
-
-                             -- possibly do some destruction here?
-                             $(case messageIsDestructor msg of
-                                -- do nothing (will hopefully get optimized away)
-                                 False -> [e|return retval|]
-                                 True -> [e|$(varE destroyName) $(varE proxyName) |])
-
-                             return retval
-                             |])|]
-
-               export hname
-               return (cdec : declist)
-
     -- collect all message bindings for a given interface
-    theMessages <- liftM concat $ sequence $ zipWith generateMessage [0..] $
+    theMessages <- liftM concat $ sequence
+                   $ zipWith (generateMessage  ps sc iface destroyName) [0..] $
         case sc of
                     Server -> interfaceEvents iface
                     Client -> interfaceRequests iface
